@@ -23,7 +23,9 @@ logger = config.get_logger()
 class XnatTargetHandler(TargetHandler[XnatTarget]):
     view_template = "targets/xnat.html"
     edit_template = "targets/xnat-edit.html"
+    test_template = "targets/xnat-test.html"
     icon = "fa-hdd"
+    display_name = "XNAT"
 
     def send_to_target(
         self, task_id: str, target: XnatTarget, dispatch_info: TaskDispatch, source_folder: Path
