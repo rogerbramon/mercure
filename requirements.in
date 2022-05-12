@@ -52,5 +52,6 @@ pydicom
 pydantic
 pillow >= 9.1.1
 dicomweb-client
+pyxnat
 boto3
 freezegun
