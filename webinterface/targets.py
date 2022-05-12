@@ -1,217 +1,187 @@
 """
-types.py
-========
-Definitions for using TypedDicts throughout mercure.
+targets.py
+==========
+Targets page for the graphical user interface of mercure.
 """
 
 # Standard python includes
-from typing import Any, Dict, List, Optional, Type, Union, cast
-from typing_extensions import Literal, TypedDict
-from pydantic import BaseModel, create_model_from_typeddict
+import json
 import daiquiri
-import typing
+from typing import Union
 
-# TODO: Add description for the individual classes
+# Starlette-related includes
+from starlette.applications import Starlette
+from starlette.responses import Response, PlainTextResponse, JSONResponse, RedirectResponse
+from starlette.authentication import requires
 
-
-class Compat:
-    def get(self, item, els=None) -> Any:
-        return self.__dict__.get(item, els) or els
-
-
-class EmptyDict(TypedDict):
-    pass
-
-
-class Target(BaseModel, Compat):
-    contact: Optional[str] = ""
-    comment: str = ""
-
-    @classmethod
-    def __get_validators__(cls):
-        # one or more validators may be yielded which will be called in the
-        # order to validate the input, each validator will receive as an input
-        # the value returned from the previous validator
-        yield cls.validate
-
-    @classmethod
-    def validate(cls, v):
-        """Parse the target as any of the known target types."""
-
-        subclass_dict: typing.Dict[str, Type[Target]] = {sbc.__name__: sbc for sbc in cls.__subclasses__()}
-
-        for k in subclass_dict:
-            try:
-                return subclass_dict[k](**v)
-            except:
-                pass
-
-        raise ValueError("Couldn't validate target as any of", list(subclass_dict.keys()))
-
-    @classmethod
-    def get_name(cls) -> str:
-        return cls.construct().target_type  # type: ignore
+# App-specific includes
+import common.config as config
+import common.monitor as monitor
+from common.constants import mercure_defs
+from common.types import DicomTarget, SftpTarget
+from webinterface.common import *
+import dispatch.target_types as target_types
 
 
-class DicomTarget(Target):
-    target_type: Literal["dicom"] = "dicom"
-    ip: str
-    port: str
-    aet_target: str
-    aet_source: Optional[str] = ""
+logger = config.get_logger()
 
 
-class SftpTarget(Target):
-    target_type: Literal["sftp"] = "sftp"
-    folder: str
-    user: str
-    host: str
-    password: Optional[str]
-
-class XnatTarget(Target):
-    target_type: Literal["xnat"] = "xnat"
-    project_id: str
-    user: str
-    host: str
-    password: Optional[str]
-
-# class HTTPAuthInfo(BaseModel):
-#     username: str
-#     password: str
-class DicomWebTarget(Target):
-    target_type: Literal["dicomweb"] = "dicomweb"
-    url: str
-    qido_url_prefix: Optional[str]
-    wado_url_prefix: Optional[str]
-    stow_url_prefix: Optional[str]
-    access_token: Optional[str]
-    http_user: Optional[str]
-    http_password: Optional[str]
+###################################################################################
+## Targets endpoints
+###################################################################################
 
 
-class Module(BaseModel, Compat):
-    docker_tag: Optional[str] = ""
-    additional_volumes: Optional[str] = ""
-    environment: Optional[str] = ""
-    docker_arguments: Optional[str] = ""
-    settings: Dict[str, Any] = {}
-    contact: Optional[str] = ""
-    comment: Optional[str] = ""
-    constraints: Optional[str] = ""
-    resources: Optional[str] = ""
+targets_app = Starlette()
 
 
-class UnsetRule(TypedDict):
-    rule: str
+@targets_app.route("/", methods=["GET"])
+@requires("authenticated", redirect="login")
+async def show_targets(request) -> Response:
+    """Shows all configured targets."""
+    try:
+        config.read_config()
+    except:
+        return PlainTextResponse("Configuration is being updated. Try again in a minute.")
+
+    used_targets = {}
+    for rule in config.mercure.rules:
+        used_target = config.mercure.rules[rule].get("target", "NONE")
+        used_targets[used_target] = rule
+
+    template = "targets.html"
+    context = {
+        "request": request,
+        "mercure_version": mercure_defs.VERSION,
+        "page": "targets",
+        "targets": config.mercure.targets,
+        "used_targets": used_targets,
+        "get_target_handler": target_types.get_handler,
+    }
+    context.update(get_user_information(request))
+    return templates.TemplateResponse(template, context)
 
 
-class Rule(BaseModel, Compat):
-    rule: str = "False"
-    target: str = ""
-    disabled: Literal["True", "False"] = "False"
-    fallback: Literal["True", "False"] = "False"
-    contact: str = ""
-    comment: str = ""
-    tags: str = ""
-    action: Literal["route", "both", "process", "discard", "notification"] = "route"
-    action_trigger: Literal["series", "study"] = "series"
-    study_trigger_condition: Literal["timeout", "received_series"] = "timeout"
-    study_trigger_series: str = ""
-    priority: Literal["normal", "urgent", "offpeak"] = "normal"
-    processing_module: str = ""
-    processing_settings: Dict[str, Any] = {}
-    processing_retain_images: Literal["True", "False"] = "False"
-    notification_webhook: str = ""
-    notification_payload: str = ""
-    notification_trigger_reception: Literal["True", "False"] = "True"
-    notification_trigger_completion: Literal["True", "False"] = "True"
-    notification_trigger_error: Literal["True", "False"] = "True"
+@targets_app.route("/", methods=["POST"])
+@requires(["authenticated", "admin"], redirect="login")
+async def add_target(request) -> Response:
+    """Creates a new target."""
+    try:
+        config.read_config()
+    except:
+        return PlainTextResponse("Configuration is being updated. Try again in a minute.")
+
+    form = dict(await request.form())
+
+    newtarget = form.get("name", "")
+    if newtarget in config.mercure.targets:
+        return PlainTextResponse("Target already exists.")
+
+    config.mercure.targets[newtarget] = DicomTarget(ip="", port="", aet_target="")
+
+    try:
+        config.save_config()
+    except:
+        return PlainTextResponse("ERROR: Unable to write configuration. Try again.")
+
+    logger.info(f"Created target {newtarget}")
+    monitor.send_webgui_event(monitor.w_events.TARGET_CREATE, request.user.display_name, newtarget)
+    return RedirectResponse(url="/targets/edit/" + newtarget, status_code=303)
 
 
-class Config(BaseModel, Compat):
-    appliance_name: str
-    port: int
-    accept_compressed_images: str
-    incoming_folder: str
-    studies_folder: str
-    outgoing_folder: str
-    success_folder: str
-    error_folder: str
-    discard_folder: str
-    processing_folder: str
-    router_scan_interval: int  # in seconds
-    dispatcher_scan_interval: int  # in seconds
-    cleaner_scan_interval: int  # in seconds
-    retention: int  # in seconds (3 days)
-    retry_delay: int  # in seconds (15 min)
-    retry_max: int
-    series_complete_trigger: int  # in seconds
-    study_complete_trigger: int  # in seconds
-    study_forcecomplete_trigger: int  # in seconds
-    graphite_ip: str
-    graphite_port: int
-    bookkeeper: str
-    offpeak_start: str
-    offpeak_end: str
-    targets: Dict[str, Target]
-    rules: Dict[str, Rule]
-    modules: Dict[str, Module]
-    process_runner: Literal["docker", "nomad", ""] = ""
-    bookkeeper_api_key: Optional[str]
+@targets_app.route("/edit/{target}", methods=["GET"])
+@requires(["authenticated", "admin"], redirect="login")
+async def targets_edit(request) -> Response:
+    """Shows the edit page for the given target."""
+    try:
+        config.read_config()
+    except:
+        return PlainTextResponse("Configuration is being updated. Try again in a minute.")
+
+    edittarget = request.path_params["target"]
+
+    if not edittarget in config.mercure.targets:
+        return RedirectResponse(url="/targets", status_code=303)
+
+    template = "targets_edit.html"
+    context = {
+        "request": request,
+        "mercure_version": mercure_defs.VERSION,
+        "page": "targets",
+        "targets": config.mercure.targets,
+        "edittarget": edittarget,
+        "get_target_handler": target_types.get_handler,
+        "target_types": target_types.target_types(),
+        "target_names": [k.get_name() for k in target_types.target_types()],
+    }
+    context.update(get_user_information(request))
+    return templates.TemplateResponse(template, context)
 
 
-class TaskInfo(BaseModel, Compat):
-    action: Literal["route", "both", "process", "discard", "notification"]
-    uid: str
-    uid_type: Literal["series", "study"]
-    triggered_rules: Union[Dict[str, Literal[True]], str]
-    applied_rule: Optional[str]
-    mrn: str
-    acc: str
-    mercure_version: str
-    mercure_appliance: str
-    mercure_server: str
+@targets_app.route("/edit/{target}", methods=["POST"])
+@requires(["authenticated", "admin"], redirect="login")
+async def targets_edit_post(request) -> Union[RedirectResponse, PlainTextResponse]:
+    """Updates the given target using the form values posted with the request."""
+    try:
+        config.read_config()
+    except:
+        return PlainTextResponse("Configuration is being updated. Try again in a minute.")
+
+    edittarget: str = request.path_params["target"]
+    form = dict(await request.form())
+
+    if not edittarget in config.mercure.targets:
+        return PlainTextResponse("Target does not exist anymore.")
+
+    TargetType = target_types.type_from_name(form["target_type"])
+
+    config.mercure.targets[edittarget] = target_types.get_handler(form["target_type"]).from_form(form, TargetType)
+
+    try:
+        config.save_config()
+    except:
+        return PlainTextResponse("ERROR: Unable to write configuration. Try again.")
+
+    logger.info(f"Edited target {edittarget}")
+    monitor.send_webgui_event(monitor.w_events.TARGET_EDIT, request.user.display_name, edittarget)
+    return RedirectResponse(url="/targets", status_code=303)
 
 
-class TaskDispatch(BaseModel, Compat):
-    target_name: str
-    retries: Optional[int] = 0
-    next_retry_at: Optional[float] = 0
-    series_uid: Optional[str]
+@targets_app.route("/delete/{target}", methods=["POST"])
+@requires(["authenticated", "admin"], redirect="login")
+async def targets_delete_post(request) -> Response:
+    """Deletes the given target."""
+    try:
+        config.read_config()
+    except:
+        return PlainTextResponse("Configuration is being updated. Try again in a minute.")
+
+    deletetarget = request.path_params["target"]
+
+    if deletetarget in config.mercure.targets:
+        del config.mercure.targets[deletetarget]
+
+    try:
+        config.save_config()
+    except:
+        return PlainTextResponse("ERROR: Unable to write configuration. Try again.")
+
+    logger.info(f"Deleted target {deletetarget}")
+    monitor.send_webgui_event(monitor.w_events.TARGET_DELETE, request.user.display_name, deletetarget)
+    return RedirectResponse(url="/targets", status_code=303)
 
 
-class TaskStudy(BaseModel, Compat):
-    study_uid: str
-    complete_trigger: Optional[str]
-    complete_required_series: str
-    creation_time: str
-    last_receive_time: str
-    received_series: Optional[List]
-    complete_force: Literal["True", "False"]
+@targets_app.route("/test/{target}", methods=["POST"])
+@requires(["authenticated"], redirect="login")
+async def targets_test_post(request) -> Response:
+    """Tests the connectivity of the given target by executing ping and c-echo requests."""
+    try:
+        config.read_config()
+    except:
+        return PlainTextResponse("Configuration is being updated. Try again in a minute.")
 
+    testtarget = request.path_params["target"]
+    target = config.mercure.targets[testtarget]
 
-class TaskProcessing(BaseModel, Compat):
-    module_name: str
-    module_config: Optional[Module]
-    settings: Dict[str, Any] = {}
-    retain_input_images: Literal["False", "True"]
-
-
-class Task(BaseModel, Compat):
-    info: TaskInfo
-    id: str
-    dispatch: Union[TaskDispatch, EmptyDict] = cast(EmptyDict, {})
-    process: Union[TaskProcessing, EmptyDict] = cast(EmptyDict, {})
-    study: Union[TaskStudy, EmptyDict] = cast(EmptyDict, {})
-    nomad_info: Optional[Any]
-
-    class Config:
-        extra = "forbid"
-
-
-class TaskHasStudy(BaseModel, Compat):
-    info: TaskInfo
-    id: str
-    dispatch: Union[TaskDispatch, EmptyDict] = cast(EmptyDict, {})
-    process: Union[Module, EmptyDict] = cast(EmptyDict, {})
-    study: TaskStudy
+    handler = target_types.get_handler(target)
+    result = await handler.test_connection(target, testtarget)
+    return templates.TemplateResponse(handler.test_template, {"request": request, "result": result})
