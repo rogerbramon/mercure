@@ -7,8 +7,10 @@ and stores the information in a Postgres database.
 
 # Standard python includes
 import os
+from pathlib import Path
 import subprocess
 import sys
+from typing import Union
 import asyncpg
 from sqlalchemy.dialects.postgresql import insert
 import uvicorn
@@ -132,6 +134,45 @@ async def post_mercure_event(request) -> JSONResponse:
     return JSONResponse({"ok": ""})
 
 
+@app.route("/processor-logs", methods=["POST"])
+@requires("authenticated")
+async def processor_logs(request) -> JSONResponse:
+    """Endpoint for receiving mercure system events."""
+    payload = dict(await request.form())
+
+    try:
+        task_id = payload["task_id"]
+    except IndexError:
+        return JSONResponse({"error": "no task_id supplied"}, 400)
+    try:
+        module_name = payload["module_name"]
+    except IndexError:
+        return JSONResponse({"error": "no module_name supplied"}, 400)
+
+    time = datetime.datetime.now()
+    try:
+        logs = str(payload.get("logs", ""))
+    except:
+        return JSONResponse({"error": "unable to read logs"}, 400)
+
+    if (logs_folder_str := config.mercure.processing_logs.logs_file_store) and (
+        logs_path := Path(logs_folder_str)
+    ).exists():
+        query = processor_logs_table.insert().values(task_id=task_id, module_name=module_name, time=time, logs=None)
+        result = await database.execute(query)
+
+        logs_path = logs_path / task_id
+        logs_path.mkdir(exist_ok=True)
+        logs_file = logs_path / f"{module_name}.{str(result)}.txt"
+        logs_file.write_text(logs, encoding="utf-8")
+    else:
+        query = processor_logs_table.insert().values(task_id=task_id, module_name=module_name, time=time, logs=logs)
+        result = await database.execute(query)
+
+    logger.debug(result)
+    return JSONResponse({"ok": ""})
+
+
 @app.route("/webgui-event", methods=["POST"])
 @requires("authenticated")
 async def post_webgui_event(request) -> JSONResponse:
@@ -217,7 +258,7 @@ async def register_series(request) -> JSONResponse:
     try:
         await parse_and_submit_tags(payload)
     except asyncpg.exceptions.UniqueViolationError:
-        logger.debug("Series already registered.")
+        logger.debug("Series already registered.", exc_info=None)
 
     return JSONResponse({"ok": ""})
 
@@ -264,7 +305,9 @@ async def update_task(request) -> JSONResponse:
     if "info" in payload:
         if payload["info"]["uid_type"] == "study":
             study_uid = payload["info"]["uid"]
+            series_uid = payload["study"]["received_series_uid"][0]
             update_values["study_uid"] = study_uid
+            update_values["series_uid"] = series_uid
         if payload["info"]["uid_type"] == "series":
             series_uid = payload["info"]["uid"]
             update_values["series_uid"] = series_uid
@@ -325,10 +368,17 @@ async def post_task_event(request) -> JSONResponse:
     sender = payload.get("sender", "Unknown")
     event = payload.get("event", monitor.task_event.UNKNOWN)
     client_timestamp = None
+    event_time = datetime.datetime.now()
 
     if "timestamp" in payload:
         try:
             client_timestamp = float(payload.get("timestamp"))  # type: ignore
+        except:
+            pass
+
+    if "time" in payload:
+        try:
+            event_time = datetime.datetime.fromisoformat(payload.get("time"))  # type: ignore
         except:
             pass
 
@@ -351,7 +401,7 @@ async def post_task_event(request) -> JSONResponse:
         file_count=file_count,
         target=target,
         info=info,
-        time=datetime.datetime.now(),
+        time=event_time,
         client_timestamp=client_timestamp,
     )
     await database.execute(query)

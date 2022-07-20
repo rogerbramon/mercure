@@ -14,7 +14,7 @@ import pprint
 
 # from mypy_extensions import TypedDict
 from typing_extensions import Literal
-from typing import Dict, Optional, cast
+from typing import Dict, Optional, cast, Tuple
 from common.types import *
 
 # App-specific includes
@@ -124,6 +124,7 @@ def add_study(
         creation_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         last_receive_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         received_series=[tags_list.get("SeriesDescription", mercure_options.INVALID)],
+        received_series_uid=[tags_list.get("SeriesInstanceUID", mercure_options.INVALID)],
         complete_force="False",
     )
 
@@ -273,11 +274,12 @@ def update_study_task(
     applied_rule: str,
     study_UID: str,
     tags_list: Dict[str, str],
-) -> bool:
+) -> Tuple[bool, str]:
     """
     Update the study task file with information from the latest received series
     """
     series_description = tags_list.get("SeriesDescription", mercure_options.INVALID)
+    series_uid = tags_list.get("SeriesInstanceUID", mercure_options.INVALID)
     task_filename = folder_name + mercure_names.TASKFILE
 
     # Load existing task file. Raise error if it does not exist
@@ -286,12 +288,12 @@ def update_study_task(
             task: Task = Task(**json.load(task_file))
     except:
         logger.error(f"Unable to open study task file {task_filename}", task_id)  # handle_error
-        return False
+        return False, ""
 
     # Ensure that the task file contains the study information
     if not task.study:
         logger.error(f"Study information missing in task file {task_filename}", task_id)  # handle_error
-        return False
+        return False, ""
 
     study = cast(TaskStudy, task.study)
 
@@ -304,12 +306,20 @@ def update_study_task(
     else:
         study.received_series = [series_description]
 
+    # Also remember the received SeriesUIDs for information purpose
+    if study.received_series_uid and (isinstance(study.received_series_uid, list)):
+        study.received_series_uid.append(series_uid)
+    else:
+        study.received_series_uid = [series_uid]
+
     # Safe the updated file back to disk
     try:
         with open(task_filename, "w") as task_file:
             json.dump(task.dict(), task_file)
     except:
         logger.error(f"Unable to write task file {task_filename}", task.id)  # handle_error
-        return False
+        return False, ""
 
-    return True
+    monitor.send_update_task(task)
+
+    return True, task.id
